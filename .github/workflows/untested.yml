@@ -38,11 +38,10 @@ jobs:
 
       - name: Patch KernelSU Next
         run: |
-          cd kernel_pixel
+          cd kernel_pixel/common
 
-          curl -LSs \
-            https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
-            | bash -
+          curl -LSs https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh | bash -
+
 
       - name: Build Akita kernel
         run: |
