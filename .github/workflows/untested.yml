@@ -1,0 +1,59 @@
+name: Build GrapheneOS Akita Kernel + KernelSU Next
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Maximize disk space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          swap-size-mb: 8192
+          remove-dotnet: true
+          remove-android: true
+          remove-haskell: true
+          remove-codeql: true
+          remove-docker-images: true
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            git curl python3 python-is-python3 \
+            bc bison flex rsync zip unzip \
+            build-essential ccache \
+            device-tree-compiler
+
+      - name: Clone GrapheneOS kernel
+        run: |
+          git clone \
+            --branch 17-qpr2-base \
+            --depth=1 \
+            --recurse-submodules \
+            https://gitlab.com/grapheneos/kernel_pixel.git
+
+      - name: Patch KernelSU Next
+        run: |
+          cd kernel_pixel
+
+          curl -LSs \
+            https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
+            | bash -
+
+      - name: Build Akita kernel
+        run: |
+          cd kernel_pixel
+
+          KLEAF_REPO_MANIFEST=aosp_manifest.xml \
+          ./build_akita.sh --lto=full
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: akita-kernel
+          path: |
+            kernel_pixel/out/akita/dist/**
