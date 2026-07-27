@@ -1,0 +1,76 @@
+name: Build GKI v2 6.1 + KernelSU Next
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Runs at 00:00 every Sunday to catch upstream AOSP drifts early
+    - cron: '0 0 * * 0'
+
+jobs:
+  build-gki:
+    name: Build Android14-6.1 GKI
+    runs-on: ubuntu-latest
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          swap-size-mb: 8192
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
+      - name: Install Host Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev \
+            g++-multilib libxml2-utils bzip2 libbz2-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool \
+            make optipng maven libssl-dev pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl \
+            libxml-simple-perl bc libc6-dev-i386 lib32ncurses5-dev x11proto-core-dev libx11-dev lib32z-dev \
+            libgl1-mesa-dev xsltproc unzip device-tree-compiler python3 python-is-python3
+
+      - name: Setup Repo Tool
+        run: |
+          mkdir -p ~/bin
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          sudo ln -sf ~/bin/repo /usr/bin/repo
+
+      - name: Init and Sync AOSP Manifest
+        run: |
+          mkdir workspace
+          cd workspace
+          git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          
+          # Pulling the GKI V2 6.1 branch
+          repo init -u https://android.googlesource.com/kernel/manifest -b common-android14-6.1 --depth=1
+          
+          # Sync using all available cores, dropping heavy tags and clone bundles
+          repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle
+
+      - name: Patch KernelSU Next
+        run: |
+          cd workspace/common
+          
+          # Inject KernelSU Next directly into the common tree
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
+
+      - name: Build GKI Kernel with Bazel
+        run: |
+          cd workspace
+          
+          # GKI V2 requires Bazel for hermetic builds; this handles toolchains automatically
+          tools/bazel run //common:kernel_aarch64_dist -- --dist_dir=out/dist
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: GKI-6.1-KernelSU-Next
+          path: |
+            workspace/out/dist/boot.img
+            workspace/out/dist/Image
+            workspace/out/dist/*.ko
+          compression-level: 9
