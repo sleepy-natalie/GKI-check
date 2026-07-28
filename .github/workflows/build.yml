@@ -49,12 +49,12 @@ jobs:
           # Sync using all available cores, dropping heavy tags and clone bundles
           repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle
 
-      - name: Patch KernelSU Next
-        run: |
-          cd workspace/common
+ #     - name: Patch KernelSU Next
+#        run: |
+ #         cd workspace/common
           
           # Inject KernelSU Next directly into the common tree
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
+  #        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
 
       - name: Build GKI Kernel with Bazel
         run: |
