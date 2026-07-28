@@ -1,4 +1,4 @@
-name: Build GrapheneOS Akita Kernel + KernelSU Next
+name: Build GrapheneOS Akita Kernel
 
 on:
   workflow_dispatch:
@@ -36,11 +36,7 @@ jobs:
             --recurse-submodules \
             https://gitlab.com/grapheneos/kernel_pixel.git
 
-      - name: Patch KernelSU Next
-        run: |
-          cd kernel_pixel/common
 
-          curl -LSs https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh | bash -
 
 
       - name: Build Akita kernel
