@@ -3,6 +3,16 @@ name: Build GKI 6.1
 on:
   workflow_dispatch:
     inputs:
+      source_method:
+        name: Source Sync Method
+        description: How to obtain the kernel source
+        type: choice
+        required: true
+        default: repo
+        options:
+          - repo
+          - git
+
       gki_source:
         name: GKI Source
         description: Select the GKI source
@@ -14,18 +24,32 @@ on:
           - custom
 
       gki_manifest:
-        name: Custom Manifest URL
-        description: Manifest repository URL when using custom GKI source
+        name: Repo Manifest URL
+        description: Manifest repository URL when using repo
         type: string
         required: false
         default: ""
 
       gki_branch:
         name: GKI Branch
-        description: Manifest branch to build
+        description: Branch to build
         type: string
         required: true
         default: common-android14-6.1
+
+      git_url:
+        name: Git Repository URL
+        description: Repository to clone when using git
+        type: string
+        required: false
+        default: ""
+
+      git_branch:
+        name: Git Branch
+        description: Branch to clone when using git
+        type: string
+        required: false
+        default: ""
 
       ksu:
         name: KernelSU
@@ -40,18 +64,17 @@ on:
 
       ksu_url:
         name: Custom KernelSU Setup URL
-        description: setup.sh URL when using custom KernelSU
         type: string
         required: false
         default: ""
 
       ksu_ref:
         name: KernelSU Ref
-        description: Branch/ref passed to KernelSU setup script
         type: string
         required: false
         default: next
 
+        
   schedule:
     # Runs at 00:00 every Sunday
     - cron: '0 0 * * 0'
@@ -189,7 +212,8 @@ jobs:
           [ "$KSU" != "none" ] && echo "KSU URL  : $KSU_URL"
           echo "======================================"
 
-      - name: Init and Sync GKI Manifest
+      - name: Init and Sync with Repo
+        if: inputs.source_method == 'repo' || inputs.source_method == ''
         run: |
           set -e
 
@@ -199,9 +223,16 @@ jobs:
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
 
+          MANIFEST_URL="${{ steps.config.outputs.gki_manifest }}"
+          BRANCH="${{ steps.config.outputs.gki_branch }}"
+
+          echo "Initializing repo:"
+          echo "  Manifest: $MANIFEST_URL"
+          echo "  Branch:   $BRANCH"
+
           repo init \
-            -u "${{ steps.config.outputs.gki_manifest }}" \
-            -b "${{ steps.config.outputs.gki_branch }}" \
+            -u "$MANIFEST_URL" \
+            -b "$BRANCH" \
             --depth=1
 
           repo sync \
@@ -209,6 +240,48 @@ jobs:
             -j"$(nproc --all)" \
             --no-tags \
             --no-clone-bundle
+
+      - name: Clone with Git
+        if: inputs.source_method == 'git'
+        run: |
+          set -e
+
+          REPO_URL="${{ inputs.git_url }}"
+          BRANCH="${{ inputs.git_branch }}"
+
+          if [ -z "$REPO_URL" ]; then
+            echo "::error::Git source selected but no repository URL was provided."
+            exit 1
+          fi
+
+          mkdir -p workspace
+
+          echo "Cloning:"
+          echo "  Repository: $REPO_URL"
+
+          if [ -n "$BRANCH" ]; then
+            echo "  Branch:     $BRANCH"
+
+            git clone \
+              --recursive \
+              --depth=1 \
+              --branch "$BRANCH" \
+              "$REPO_URL" \
+              workspace
+          else
+            git clone \
+              --recursive \
+              --depth=1 \
+              "$REPO_URL" \
+              workspace
+          fi
+
+          cd workspace
+
+          # Make sure nested submodules are initialized and updated.
+          git submodule update \
+            --init \
+            --recursive
 
       - name: Patch KernelSU
         if: steps.config.outputs.ksu != 'none'
