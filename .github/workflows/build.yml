@@ -243,7 +243,9 @@ jobs:
 
            - name: Clone Kernel with Git
         if: inputs.source_method == 'git'
+        
         shell: bash
+        
         run: |
           set -e
 
