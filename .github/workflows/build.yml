@@ -241,8 +241,9 @@ jobs:
             --no-tags \
             --no-clone-bundle
 
-      - name: Clone with Git
+           - name: Clone Kernel with Git
         if: inputs.source_method == 'git'
+        shell: bash
         run: |
           set -e
 
@@ -254,14 +255,9 @@ jobs:
             exit 1
           fi
 
-          mkdir -p workspace
-
-          echo "Cloning:"
-          echo "  Repository: $REPO_URL"
+          rm -rf workspace
 
           if [ -n "$BRANCH" ]; then
-            echo "  Branch:     $BRANCH"
-
             git clone \
               --recursive \
               --depth=1 \
@@ -278,23 +274,43 @@ jobs:
 
           cd workspace
 
-          # Make sure nested submodules are initialized and updated.
-          git submodule update \
-            --init \
-            --recursive
+          git submodule update --init --recursive
 
+          echo "Kernel source:"
+          git remote -v
+
+          echo
+          echo "Kernel tree:"
+          ls -la
+
+          
       - name: Patch KernelSU
         if: steps.config.outputs.ksu != 'none'
+        shell: bash
         run: |
           set -e
 
-          cd workspace/common
+          KSU_URL="${{ steps.config.outputs.ksu_url }}"
 
-          echo "Installing KernelSU..."
-          echo "Setup script: ${{ steps.config.outputs.ksu_url }}"
+          if [ -d "workspace/common" ]; then
+            # repo-based GKI checkout
+            KERNEL_DIR="workspace/common"
+          elif [ -f "workspace/Makefile" ] && [ -f "workspace/BUILD.bazel" ]; then
+            # direct kernel repository, e.g. engstk/gs
+            KERNEL_DIR="workspace"
+          else
+            echo "::error::Unable to identify kernel source tree."
+            exit 1
+          fi
 
-          curl -LSs "${{ steps.config.outputs.ksu_url }}" | bash -
+          echo "Kernel directory: $KERNEL_DIR"
+          echo "KernelSU setup:   $KSU_URL"
 
+          cd "$KERNEL_DIR"
+
+          curl -LSs "$KSU_URL" | bash -
+
+          
       - name: Build GKI Kernel with Bazel
         run: |
           set -e
