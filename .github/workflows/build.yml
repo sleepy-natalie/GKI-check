@@ -1,11 +1,11 @@
-name: Build GKI 6.1
+name: Build GKI / Kernel
 
 on:
   workflow_dispatch:
     inputs:
       source_method:
         name: Source Sync Method
-        description: How to obtain the kernel source
+        description: Choose between an AOSP repo manifest or a direct Git kernel repository.
         type: choice
         required: true
         default: repo
@@ -15,7 +15,7 @@ on:
 
       gki_source:
         name: GKI Source
-        description: Select the GKI source
+        description: Use the default AOSP GKI manifest or a custom manifest.
         type: choice
         required: true
         default: default
@@ -24,36 +24,43 @@ on:
           - custom
 
       gki_manifest:
-        name: Repo Manifest URL
-        description: Manifest repository URL when using repo
+        name: Custom Repo Manifest URL
+        description: Manifest repository URL when using a custom repo source.
         type: string
         required: false
         default: ""
 
       gki_branch:
         name: GKI Branch
-        description: Branch to build
+        description: AOSP GKI manifest branch.
         type: string
         required: true
         default: common-android14-6.1
 
       git_url:
         name: Git Repository URL
-        description: Repository to clone when using git
+        description: Kernel repository to clone when using Git mode.
         type: string
         required: false
-        default: ""
+        default: https://github.com/engstk/gs
 
       git_branch:
         name: Git Branch
-        description: Branch to clone when using git
+        description: Kernel repository branch.
         type: string
         required: false
-        default: ""
+        default: blu_spark-17-susfs
+
+      defconfig:
+        name: Kernel Defconfig
+        description: ARM64 defconfig used by the direct Git kernel build.
+        type: string
+        required: false
+        default: blu_spark_defconfig
 
       ksu:
         name: KernelSU
-        description: Select KernelSU integration
+        description: Select KernelSU integration.
         type: choice
         required: true
         default: none
@@ -64,35 +71,38 @@ on:
 
       ksu_url:
         name: Custom KernelSU Setup URL
-        description: URL to a KernelSU setup.sh script
+        description: URL to a KernelSU setup.sh script when using custom KSU.
         type: string
         required: false
         default: ""
 
       ksu_ref:
-        name: KernelSU Ref
-        description: Branch/ref used by KernelSU Next
+        name: KernelSU Next Ref
+        description: Branch/ref used by KernelSU Next.
         type: string
         required: false
         default: next
 
   schedule:
-    # Runs at 00:00 every Sunday
+    # Runs at 00:00 every Sunday.
+    # Scheduled builds use the defaults defined below.
     - cron: "0 0 * * 0"
 
 env:
   DEFAULT_MANIFEST: https://android.googlesource.com/kernel/manifest
   DEFAULT_BRANCH: common-android14-6.1
   DEFAULT_GIT_URL: https://github.com/engstk/gs
+  DEFAULT_GIT_BRANCH: blu_spark-17-susfs
+  DEFAULT_DEFCONFIG: blu_spark_defconfig
   DEFAULT_KSU_REF: next
 
 jobs:
-  build-gki:
-    name: Build GKI 6.1
+  build-kernel:
+    name: Build Kernel
     runs-on: ubuntu-latest
 
     steps:
-      - name: Maximize build space
+      - name: Maximize Build Space
         uses: easimon/maximize-build-space@master
         with:
           root-reserve-mb: 8192
@@ -126,22 +136,27 @@ jobs:
             device-tree-compiler \
             python3 \
             python-is-python3 \
-            rsync
+            rsync \
+            clang \
+            lld \
+            llvm
 
       - name: Setup Repo Tool
         shell: bash
         run: |
           set -e
 
-          mkdir -p ~/bin
+          mkdir -p "$HOME/bin"
 
           curl -LSs \
             https://storage.googleapis.com/git-repo-downloads/repo \
-            -o ~/bin/repo
+            -o "$HOME/bin/repo"
 
-          chmod a+x ~/bin/repo
+          chmod a+x "$HOME/bin/repo"
 
-          sudo ln -sf ~/bin/repo /usr/bin/repo
+          sudo ln -sf "$HOME/bin/repo" /usr/bin/repo
+
+          repo --version
 
       - name: Resolve Build Configuration
         id: config
@@ -149,18 +164,23 @@ jobs:
         run: |
           set -e
 
-          # GitHub Actions inputs are empty on scheduled runs.
           SOURCE_METHOD="${{ inputs.source_method }}"
           GKI_SOURCE="${{ inputs.gki_source }}"
           GKI_MANIFEST="${{ inputs.gki_manifest }}"
           GKI_BRANCH="${{ inputs.gki_branch }}"
+
           GIT_URL="${{ inputs.git_url }}"
           GIT_BRANCH="${{ inputs.git_branch }}"
+          DEFCONFIG="${{ inputs.defconfig }}"
+
           KSU="${{ inputs.ksu }}"
           KSU_URL="${{ inputs.ksu_url }}"
           KSU_REF="${{ inputs.ksu_ref }}"
 
-          # Defaults.
+          # ------------------------------------------------------------
+          # Defaults
+          # ------------------------------------------------------------
+
           if [ -z "$SOURCE_METHOD" ]; then
             SOURCE_METHOD="repo"
           fi
@@ -181,6 +201,14 @@ jobs:
             GIT_URL="$DEFAULT_GIT_URL"
           fi
 
+          if [ -z "$GIT_BRANCH" ]; then
+            GIT_BRANCH="$DEFAULT_GIT_BRANCH"
+          fi
+
+          if [ -z "$DEFCONFIG" ]; then
+            DEFCONFIG="$DEFAULT_DEFCONFIG"
+          fi
+
           if [ -z "$KSU" ]; then
             KSU="none"
           fi
@@ -189,13 +217,21 @@ jobs:
             KSU_REF="$DEFAULT_KSU_REF"
           fi
 
-          # Validate source method.
+          # ------------------------------------------------------------
+          # Validate source method
+          # ------------------------------------------------------------
+
           case "$SOURCE_METHOD" in
             repo)
               ;;
             git)
               if [ -z "$GIT_URL" ]; then
-                echo "::error::Git source selected but no Git repository URL was provided."
+                echo "::error::Git mode selected but no repository URL was provided."
+                exit 1
+              fi
+
+              if [ -z "$DEFCONFIG" ]; then
+                echo "::error::Git mode requires a defconfig."
                 exit 1
               fi
               ;;
@@ -205,7 +241,10 @@ jobs:
               ;;
           esac
 
-          # Validate GKI source.
+          # ------------------------------------------------------------
+          # Validate GKI source
+          # ------------------------------------------------------------
+
           case "$GKI_SOURCE" in
             default)
               GKI_MANIFEST="$DEFAULT_MANIFEST"
@@ -222,7 +261,10 @@ jobs:
               ;;
           esac
 
-          # Validate KernelSU.
+          # ------------------------------------------------------------
+          # Resolve KernelSU
+          # ------------------------------------------------------------
+
           case "$KSU" in
             none)
               KSU_NAME="No-KSU"
@@ -231,6 +273,7 @@ jobs:
 
             ksu-next)
               KSU_NAME="KernelSU-Next"
+
               KSU_URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${KSU_REF}/kernel/setup.sh"
               ;;
 
@@ -249,7 +292,10 @@ jobs:
               ;;
           esac
 
-          # Export configuration.
+          # ------------------------------------------------------------
+          # Export configuration
+          # ------------------------------------------------------------
+
           {
             echo "source_method=$SOURCE_METHOD"
             echo "gki_source=$GKI_SOURCE"
@@ -257,35 +303,46 @@ jobs:
             echo "gki_branch=$GKI_BRANCH"
             echo "git_url=$GIT_URL"
             echo "git_branch=$GIT_BRANCH"
+            echo "defconfig=$DEFCONFIG"
             echo "ksu=$KSU"
             echo "ksu_url=$KSU_URL"
             echo "ksu_name=$KSU_NAME"
           } >> "$GITHUB_OUTPUT"
 
-          echo "======================================"
-          echo "Build configuration"
-          echo "======================================"
+          # ------------------------------------------------------------
+          # Print configuration
+          # ------------------------------------------------------------
+
+          echo "=========================================="
+          echo "Build Configuration"
+          echo "=========================================="
           echo "Source method : $SOURCE_METHOD"
           echo "GKI source    : $GKI_SOURCE"
-          echo "Manifest      : $GKI_MANIFEST"
+          echo "GKI manifest  : $GKI_MANIFEST"
           echo "GKI branch    : $GKI_BRANCH"
           echo "Git URL       : $GIT_URL"
-          echo "Git branch    : ${GIT_BRANCH:-default}"
+          echo "Git branch    : $GIT_BRANCH"
+          echo "Defconfig     : $DEFCONFIG"
           echo "KernelSU      : $KSU_NAME"
 
           if [ "$KSU" != "none" ]; then
             echo "KSU URL       : $KSU_URL"
           fi
 
-          echo "======================================"
+          echo "=========================================="
 
-      - name: Initialize and Sync with Repo
+      # ================================================================
+      # AOSP REPO BUILD
+      # ================================================================
+
+      - name: Initialize AOSP Repo
         if: steps.config.outputs.source_method == 'repo'
         shell: bash
         run: |
           set -e
 
           rm -rf workspace
+
           mkdir -p workspace
 
           cd workspace
@@ -296,9 +353,9 @@ jobs:
           MANIFEST_URL="${{ steps.config.outputs.gki_manifest }}"
           BRANCH="${{ steps.config.outputs.gki_branch }}"
 
-          echo "Initializing repo:"
-          echo "  Manifest: $MANIFEST_URL"
-          echo "  Branch:   $BRANCH"
+          echo "Initializing AOSP kernel manifest..."
+          echo "Manifest: $MANIFEST_URL"
+          echo "Branch:   $BRANCH"
 
           repo init \
             -u "$MANIFEST_URL" \
@@ -311,7 +368,11 @@ jobs:
             --no-tags \
             --no-clone-bundle
 
-      - name: Clone Kernel with Git
+      # ================================================================
+      # DIRECT GIT BUILD
+      # ================================================================
+
+      - name: Clone Kernel Repository
         if: steps.config.outputs.source_method == 'git'
         shell: bash
         run: |
@@ -320,44 +381,40 @@ jobs:
           REPO_URL="${{ steps.config.outputs.git_url }}"
           BRANCH="${{ steps.config.outputs.git_branch }}"
 
-          if [ -z "$REPO_URL" ]; then
-            echo "::error::Git source selected but no repository URL was provided."
-            exit 1
-          fi
-
           rm -rf workspace
 
-          echo "Cloning kernel repository:"
-          echo "  URL: $REPO_URL"
+          echo "Cloning kernel repository..."
+          echo "Repository: $REPO_URL"
+          echo "Branch:     $BRANCH"
 
-          if [ -n "$BRANCH" ]; then
-            echo "  Branch: $BRANCH"
-
-            git clone \
-              --recursive \
-              --depth=1 \
-              --branch "$BRANCH" \
-              "$REPO_URL" \
-              workspace
-          else
-            git clone \
-              --recursive \
-              --depth=1 \
-              "$REPO_URL" \
-              workspace
-          fi
+          git clone \
+            --recursive \
+            --depth=1 \
+            --branch "$BRANCH" \
+            "$REPO_URL" \
+            workspace
 
           cd workspace
 
-          git submodule update --init --recursive
+          git submodule update \
+            --init \
+            --recursive
 
           echo
           echo "Repository:"
           git remote -v
 
           echo
+          echo "Current commit:"
+          git rev-parse HEAD
+
+          echo
           echo "Kernel tree:"
           ls -la
+
+      # ================================================================
+      # LOCATE KERNEL TREE
+      # ================================================================
 
       - name: Detect Kernel Tree
         id: kernel
@@ -366,27 +423,22 @@ jobs:
           set -e
 
           if [ -d "workspace/common" ]; then
-            echo "Detected AOSP repo-style GKI tree."
+            echo "Detected AOSP repo-style kernel tree."
 
             KERNEL_DIR="workspace/common"
             BUILD_ROOT="workspace"
-            BUILD_TARGET="//common:kernel_aarch64_dist"
 
-          elif [ -f "workspace/Makefile" ] && [ -f "workspace/BUILD.bazel" ]; then
-            echo "Detected direct kernel repository."
+          elif [ -f "workspace/Makefile" ]; then
+            echo "Detected direct kernel source tree."
 
             KERNEL_DIR="workspace"
             BUILD_ROOT="workspace"
 
-            # This target may need to be changed depending on the
-            # exact engstk/gs branch being built.
-            BUILD_TARGET="//:kernel_aarch64_dist"
-
           else
-            echo "::error::Unable to identify a supported kernel source tree."
+            echo "::error::Could not locate kernel source tree."
 
             echo
-            echo "Workspace contents:"
+            echo "Workspace:"
             find workspace -maxdepth 2 -type f | sort | head -200
 
             exit 1
@@ -395,16 +447,14 @@ jobs:
           {
             echo "kernel_dir=$KERNEL_DIR"
             echo "build_root=$BUILD_ROOT"
-            echo "build_target=$BUILD_TARGET"
           } >> "$GITHUB_OUTPUT"
 
-          echo "======================================"
-          echo "Kernel tree detected"
-          echo "======================================"
-          echo "Kernel directory : $KERNEL_DIR"
-          echo "Build root       : $BUILD_ROOT"
-          echo "Build target     : $BUILD_TARGET"
-          echo "======================================"
+          echo "Kernel directory: $KERNEL_DIR"
+          echo "Build root:       $BUILD_ROOT"
+
+      # ================================================================
+      # KERNELSU
+      # ================================================================
 
       - name: Patch KernelSU
         if: steps.config.outputs.ksu != 'none'
@@ -419,28 +469,177 @@ jobs:
           echo "Kernel directory: $KERNEL_DIR"
           echo "Setup script:    $KSU_URL"
 
+          if [ ! -d "$KERNEL_DIR" ]; then
+            echo "::error::Kernel directory does not exist: $KERNEL_DIR"
+            exit 1
+          fi
+
           cd "$KERNEL_DIR"
 
           curl -LSs "$KSU_URL" | bash -
 
-      - name: Build GKI Kernel with Bazel
+      # ================================================================
+      # AOSP GKI CONFIGURATION
+      # ================================================================
+
+      - name: Build AOSP GKI with Bazel
+        if: steps.config.outputs.source_method == 'repo'
         shell: bash
         run: |
           set -e
 
-          BUILD_ROOT="${{ steps.kernel.outputs.build_root }}"
-          BUILD_TARGET="${{ steps.kernel.outputs.build_target }}"
+          cd workspace
 
-          cd "$BUILD_ROOT"
+          if [ ! -x "tools/bazel" ]; then
+            echo "::error::AOSP GKI Bazel launcher was not found at tools/bazel."
+            exit 1
+          fi
 
-          echo "Building:"
-          echo "  Target: $BUILD_TARGET"
-          echo "  Output: out/dist"
+          echo "Building AOSP GKI..."
 
           tools/bazel run \
-            "$BUILD_TARGET" \
+            //common:kernel_aarch64_dist \
             -- \
             --dist_dir=out/dist
+
+      # ================================================================
+      # DIRECT GIT KERNEL CONFIGURATION
+      # ================================================================
+
+      - name: Verify Git Kernel Defconfig
+        if: steps.config.outputs.source_method == 'git'
+        shell: bash
+        run: |
+          set -e
+
+          cd workspace
+
+          DEFCONFIG="${{ steps.config.outputs.defconfig }}"
+
+          CONFIG_PATH="arch/arm64/configs/$DEFCONFIG"
+
+          echo "Requested defconfig:"
+          echo "$DEFCONFIG"
+
+          if [ ! -f "$CONFIG_PATH" ]; then
+            echo "::error::Defconfig not found: $CONFIG_PATH"
+
+            echo
+            echo "Available ARM64 defconfigs matching the requested name:"
+            find arch/arm64/configs \
+              -maxdepth 1 \
+              -type f \
+              -name "*${DEFCONFIG}*" \
+              -print
+
+            echo
+            echo "Some available defconfigs:"
+            find arch/arm64/configs \
+              -maxdepth 1 \
+              -type f \
+              -printf "%f\n" \
+              | sort \
+              | head -100
+
+            exit 1
+          fi
+
+          echo "Found:"
+          echo "$CONFIG_PATH"
+
+      - name: Configure Git Kernel
+        if: steps.config.outputs.source_method == 'git'
+        shell: bash
+        run: |
+          set -e
+
+          cd workspace
+
+          DEFCONFIG="${{ steps.config.outputs.defconfig }}"
+
+          echo "Generating kernel configuration..."
+          echo "Defconfig: $DEFCONFIG"
+
+          make \
+            O=out \
+            ARCH=arm64 \
+            "$DEFCONFIG"
+
+          echo
+          echo "Kernel configuration generated."
+
+      # ================================================================
+      # DIRECT GIT KERNEL BUILD
+      # ================================================================
+
+      - name: Build Git Kernel
+        if: steps.config.outputs.source_method == 'git'
+        shell: bash
+        run: |
+          set -e
+
+          cd workspace
+
+          echo "Building kernel..."
+          echo "Architecture: arm64"
+          echo "Output:       out"
+          echo "CPUs:         $(nproc --all)"
+
+          make \
+            O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            -j"$(nproc --all)"
+
+      # ================================================================
+      # COLLECT GIT BUILD OUTPUT
+      # ================================================================
+
+      - name: Prepare Git Build Artifacts
+        if: steps.config.outputs.source_method == 'git'
+        shell: bash
+        run: |
+          set -e
+
+          cd workspace
+
+          mkdir -p out/dist
+
+          # Kernel image.
+          if [ -f "out/arch/arm64/boot/Image" ]; then
+            cp \
+              out/arch/arm64/boot/Image \
+              out/dist/Image
+          else
+            echo "::error::Kernel Image was not produced."
+            exit 1
+          fi
+
+          # Device tree blobs.
+          if compgen -G "out/arch/arm64/boot/dts/**/*.dtb" > /dev/null; then
+            find out/arch/arm64/boot/dts \
+              -type f \
+              -name "*.dtb" \
+              -exec cp {} out/dist/ \;
+          fi
+
+          # Kernel modules.
+          find out \
+            -type f \
+            -name "*.ko" \
+            -exec cp {} out/dist/ \;
+
+          echo "Final artifacts:"
+          find out/dist \
+            -maxdepth 1 \
+            -type f \
+            -printf "%f\n" \
+            | sort
+
+      # ================================================================
+      # ARTIFACT NAME
+      # ================================================================
 
       - name: Prepare Artifact Name
         id: artifact
@@ -448,9 +647,10 @@ jobs:
         run: |
           set -e
 
+          SOURCE_METHOD="${{ steps.config.outputs.source_method }}"
           KSU_NAME="${{ steps.config.outputs.ksu_name }}"
 
-          if [ "${{ steps.config.outputs.source_method }}" = "repo" ]; then
+          if [ "$SOURCE_METHOD" = "repo" ]; then
             SOURCE_NAME="${{ steps.config.outputs.gki_branch }}"
           else
             SOURCE_NAME="${{ steps.config.outputs.git_branch }}"
@@ -462,19 +662,25 @@ jobs:
 
           SAFE_SOURCE=$(echo "$SOURCE_NAME" | tr '/ ' '--')
 
-          ARTIFACT_NAME="GKI-6.1-${SAFE_SOURCE}-${KSU_NAME}"
+          ARTIFACT_NAME="Kernel-${SAFE_SOURCE}-${KSU_NAME}"
 
           echo "name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
 
-          echo "Artifact: $ARTIFACT_NAME"
+          echo "Artifact name:"
+          echo "$ARTIFACT_NAME"
+
+      # ================================================================
+      # UPLOAD
+      # ================================================================
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.artifact.outputs.name }}
           path: |
-            workspace/out/dist/boot.img
             workspace/out/dist/Image
+            workspace/out/dist/boot.img
+            workspace/out/dist/*.dtb
             workspace/out/dist/*.ko
           compression-level: 9
           if-no-files-found: error
