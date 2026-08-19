@@ -1,15 +1,70 @@
-name: Build GKI v2 6.1 + KernelSU Next
+name: Build GKI 6.1
 
 on:
   workflow_dispatch:
+    inputs:
+      gki_source:
+        name: GKI Source
+        description: Select the GKI source
+        type: choice
+        required: true
+        default: default
+        options:
+          - default
+          - custom
+
+      gki_manifest:
+        name: Custom Manifest URL
+        description: Manifest repository URL when using custom GKI source
+        type: string
+        required: false
+        default: ""
+
+      gki_branch:
+        name: GKI Branch
+        description: Manifest branch to build
+        type: string
+        required: true
+        default: common-android14-6.1
+
+      ksu:
+        name: KernelSU
+        description: Select KernelSU integration
+        type: choice
+        required: true
+        default: none
+        options:
+          - none
+          - ksu-next
+          - custom
+
+      ksu_url:
+        name: Custom KernelSU Setup URL
+        description: setup.sh URL when using custom KernelSU
+        type: string
+        required: false
+        default: ""
+
+      ksu_ref:
+        name: KernelSU Ref
+        description: Branch/ref passed to KernelSU setup script
+        type: string
+        required: false
+        default: next
+
   schedule:
-    # Runs at 00:00 every Sunday to catch upstream AOSP drifts early
+    # Runs at 00:00 every Sunday
     - cron: '0 0 * * 0'
+
+env:
+  DEFAULT_MANIFEST: https://android.googlesource.com/kernel/manifest
+  DEFAULT_BRANCH: common-android14-6.1
 
 jobs:
   build-gki:
-    name: Build Android14-6.1 GKI
+    name: Build GKI 6.1
     runs-on: ubuntu-latest
+
     steps:
       - name: Maximize build space
         uses: easimon/maximize-build-space@master
@@ -25,50 +80,178 @@ jobs:
       - name: Install Host Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git ccache flex bison build-essential zip curl \
-            zlib1g-dev libssl-dev bc xsltproc unzip device-tree-compiler \
-            python3 python-is-python3 rsync
+          sudo apt-get install -y \
+            git \
+            ccache \
+            flex \
+            bison \
+            build-essential \
+            zip \
+            curl \
+            zlib1g-dev \
+            libssl-dev \
+            bc \
+            xsltproc \
+            unzip \
+            device-tree-compiler \
+            python3 \
+            python-is-python3 \
+            rsync
 
       - name: Setup Repo Tool
         run: |
           mkdir -p ~/bin
-          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          curl -LSs https://storage.googleapis.com/git-repo-downloads/repo \
+            -o ~/bin/repo
           chmod a+x ~/bin/repo
           sudo ln -sf ~/bin/repo /usr/bin/repo
 
-      - name: Init and Sync AOSP Manifest
+      - name: Resolve Build Configuration
+        id: config
+        shell: bash
         run: |
-          mkdir workspace
+          set -e
+
+          # Defaults for scheduled builds.
+          GKI_SOURCE="${{ inputs.gki_source }}"
+          GKI_MANIFEST="${{ inputs.gki_manifest }}"
+          GKI_BRANCH="${{ inputs.gki_branch }}"
+          KSU="${{ inputs.ksu }}"
+          KSU_URL="${{ inputs.ksu_url }}"
+          KSU_REF="${{ inputs.ksu_ref }}"
+
+          if [ -z "$GKI_SOURCE" ]; then
+            GKI_SOURCE="default"
+          fi
+
+          if [ -z "$GKI_MANIFEST" ]; then
+            GKI_MANIFEST="${DEFAULT_MANIFEST}"
+          fi
+
+          if [ -z "$GKI_BRANCH" ]; then
+            GKI_BRANCH="${DEFAULT_BRANCH}"
+          fi
+
+          if [ -z "$KSU" ]; then
+            KSU="none"
+          fi
+
+          if [ -z "$KSU_REF" ]; then
+            KSU_REF="next"
+          fi
+
+          if [ "$GKI_SOURCE" = "default" ]; then
+            GKI_MANIFEST="${DEFAULT_MANIFEST}"
+          elif [ "$GKI_SOURCE" = "custom" ]; then
+            if [ -z "$GKI_MANIFEST" ]; then
+              echo "::error::Custom GKI source selected but no manifest URL was provided."
+              exit 1
+            fi
+          else
+            echo "::error::Invalid GKI source: $GKI_SOURCE"
+            exit 1
+          fi
+
+          if [ "$KSU" = "custom" ] && [ -z "$KSU_URL" ]; then
+            echo "::error::Custom KernelSU selected but no setup URL was provided."
+            exit 1
+          fi
+
+          case "$KSU" in
+            none)
+              KSU_NAME="No-KSU"
+              ;;
+            ksu-next)
+              KSU_NAME="KernelSU-Next"
+              KSU_URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${KSU_REF}/kernel/setup.sh"
+              ;;
+            custom)
+              KSU_NAME="KernelSU-Custom"
+              ;;
+            *)
+              echo "::error::Invalid KernelSU option: $KSU"
+              exit 1
+              ;;
+          esac
+
+          echo "gki_manifest=$GKI_MANIFEST" >> "$GITHUB_OUTPUT"
+          echo "gki_branch=$GKI_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "ksu=$KSU" >> "$GITHUB_OUTPUT"
+          echo "ksu_url=$KSU_URL" >> "$GITHUB_OUTPUT"
+          echo "ksu_name=$KSU_NAME" >> "$GITHUB_OUTPUT"
+
+          echo "======================================"
+          echo "Build configuration"
+          echo "======================================"
+          echo "Manifest : $GKI_MANIFEST"
+          echo "Branch   : $GKI_BRANCH"
+          echo "KernelSU : $KSU_NAME"
+          [ "$KSU" != "none" ] && echo "KSU URL  : $KSU_URL"
+          echo "======================================"
+
+      - name: Init and Sync GKI Manifest
+        run: |
+          set -e
+
+          mkdir -p workspace
           cd workspace
+
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
-          
-          # Pulling the GKI V2 6.1 branch
-          repo init -u https://android.googlesource.com/kernel/manifest -b common-android14-6.1 --depth=1
-          
-          # Sync using all available cores, dropping heavy tags and clone bundles
-          repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle
 
- #     - name: Patch KernelSU Next
-#        run: |
- #         cd workspace/common
-          
-          # Inject KernelSU Next directly into the common tree
-  #        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
+          repo init \
+            -u "${{ steps.config.outputs.gki_manifest }}" \
+            -b "${{ steps.config.outputs.gki_branch }}" \
+            --depth=1
+
+          repo sync \
+            -c \
+            -j"$(nproc --all)" \
+            --no-tags \
+            --no-clone-bundle
+
+      - name: Patch KernelSU
+        if: steps.config.outputs.ksu != 'none'
+        run: |
+          set -e
+
+          cd workspace/common
+
+          echo "Installing KernelSU..."
+          echo "Setup script: ${{ steps.config.outputs.ksu_url }}"
+
+          curl -LSs "${{ steps.config.outputs.ksu_url }}" | bash -
 
       - name: Build GKI Kernel with Bazel
         run: |
+          set -e
+
           cd workspace
-          
-          # GKI V2 requires Bazel for hermetic builds; this handles toolchains automatically
-          tools/bazel run //common:kernel_aarch64_dist -- --dist_dir=out/dist
+
+          tools/bazel run \
+            //common:kernel_aarch64_dist \
+            -- \
+            --dist_dir=out/dist
+
+      - name: Prepare Artifact Name
+        id: artifact
+        run: |
+          set -e
+
+          KSU_NAME="${{ steps.config.outputs.ksu_name }}"
+          BRANCH="${{ steps.config.outputs.gki_branch }}"
+
+          SAFE_BRANCH=$(echo "$BRANCH" | tr '/ ' '--')
+
+          echo "name=GKI-6.1-${SAFE_BRANCH}-${KSU_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: GKI-6.1-KernelSU-Next
+          name: ${{ steps.artifact.outputs.name }}
           path: |
             workspace/out/dist/boot.img
             workspace/out/dist/Image
             workspace/out/dist/*.ko
           compression-level: 9
+          if-no-files-found: error
